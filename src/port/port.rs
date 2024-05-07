@@ -1,5 +1,6 @@
 use std::net::Ipv4Addr;
-use async_timer::Oneshot;
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 use byte_unit::Byte;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -49,7 +50,8 @@ impl IngressPort{
         let time_per_packet = 1.0 / pps as f64;
         let time_per_packet_millis = time_per_packet * 1000.0;
         let time_per_packet_micros = time_per_packet_millis * 1000.0;
-        let time_per_packet_nanos = (time_per_packet_micros * 1000.0)/100.0;
+        let time_per_packet_nanos = time_per_packet_micros * 1000.0;
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_nanos(time_per_packet_nanos as u64));
         while let Some(ingress_command) = self.command_rx.recv().await{
             match ingress_command{
                 IngressPortCommand::SendFlows(resp_tx) => {
@@ -77,9 +79,11 @@ impl IngressPort{
                                     rng.gen_range(0..num_of_output_ports)
                                 };
                                 let mut prev_port: Option<u16> = None;
-                                for i in 0..packets{
-                                    oif_idx = if i % flowlet_size == 0{
-                                        async_timer::oneshot::Timer::new(std::time::Duration::from_micros(16)).await;
+
+                                while packets > 0{
+                                    interval.tick().await;
+                                    packets -= 1;
+                                    oif_idx = if packets % flowlet_size == 0{
                                         oif_idx = (oif_idx + 1) % num_of_output_ports;
                                         self.egress_ports[oif_idx].inc_flows().await;
                                         if let Some(ref p) = prev_port{
@@ -90,24 +94,17 @@ impl IngressPort{
                                     } else {
                                         oif_idx
                                     };
-                                    if let Err(e) = self.egress_ports[oif_idx].data_channel().send(()).await{
-                                        println!("Error sending to port: {}", e);
-                                    }
-                                    self.state.tx_packets += packets;
-                                    self.state.tx_bytes += self.mtu as u64;
-                                    async_timer::oneshot::Timer::new(tokio::time::Duration::from_nanos(time_per_packet_nanos as u64)).await;
+                                    self.egress_ports[oif_idx].add_to_buffer();
+                                    
                                 }
                             },
                             LoadBalancerMode::StaticHash => {
                                 let oif_idx = (flow.hash() % num_of_output_ports as u64) as usize;
                                 self.egress_ports[oif_idx].inc_flows().await;
-                                for _i in 0..packets{
-                                    if let Err(e) = self.egress_ports[oif_idx].data_channel().send(()).await{
-                                        println!("Error sending to port: {}", e);
-                                    }
-                                    self.state.tx_packets += packets;
-                                    self.state.tx_bytes += self.mtu as u64;
-                                    async_timer::oneshot::Timer::new(tokio::time::Duration::from_nanos(time_per_packet_nanos as u64)).await;
+                                while packets > 0{
+                                    interval.tick().await;
+                                    packets -= 1;
+                                    self.egress_ports[oif_idx].add_to_buffer();
                                 }
                                 self.egress_ports[oif_idx].dec_flows().await;
                             },
@@ -159,69 +156,56 @@ impl IngressPortClient{
 
 
 pub struct EgressPort{
-    port_name: String,
-    command_rx: tokio::sync::mpsc::Receiver<EgressPortCommand>,
-    state: PortState,
     client: EgressPortClient,
     mtu: u16,
     bps: u64,
-    data_rx: tokio::sync::mpsc::Receiver<()>,
-    buffer_size: u16,
+    buffer: Arc<AtomicU64>,
+    rx_packets: Arc<AtomicU64>,
 }
 
 impl EgressPort{
-    pub fn new(port_name: String, bps: u64, mtu: u16, buffer_size: u16) -> EgressPort{
-        let (command_tx, command_rx) = tokio::sync::mpsc::channel(1);
-        let (data_tx, data_rx) = tokio::sync::mpsc::channel(buffer_size as usize);
+    pub fn new(port_name: String, bps: u64, mtu: u16, buffer_size: u32) -> EgressPort{
+        let buffer = Arc::new(AtomicU64::new(0));
+        let rx_packets = Arc::new(AtomicU64::new(0));
+        let dropped_packets = Arc::new(AtomicU64::new(0));
+        let active_flows = Arc::new(AtomicU64::new(0));
+        let total_flows = Arc::new(AtomicU64::new(0));
+
         EgressPort{
-            port_name,
-            command_rx,
-            state: PortState::default(),
-            client: EgressPortClient{command_tx, data_tx},
+            client: EgressPortClient{
+                port_name: port_name.clone(),
+                buffer: buffer.clone(),
+                rx_packets: rx_packets.clone(),
+                dropped_packets,
+                active_flows,
+                total_flows,
+                buffer_size,
+                mtu,
+            },
             mtu,
             bps,
-            data_rx,
-            buffer_size,
+            buffer,
+            rx_packets,
         }
     }
     pub fn client(&self) -> EgressPortClient{
         self.client.clone()
     }
-    pub async fn run(mut self) -> anyhow::Result<()>{
+    pub async fn run(self) -> anyhow::Result<()>{
         let byte_per_sec = self.bps;
         let mtu = self.mtu;
         let pps = byte_per_sec / mtu as u64;
         let time_per_packet = 1.0 / pps as f64;
         let time_per_packet_millis = time_per_packet * 1000.0;
         let time_per_packet_micros = time_per_packet_millis * 1000.0;
-        let time_per_packet_nanos = (time_per_packet_micros * 1000.0)/100.0;
+        let time_per_packet_nanos = time_per_packet_micros * 1000.0;
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_nanos(time_per_packet_nanos as u64));
+
         loop{
-            tokio::select! {
-                command = self.command_rx.recv() => {
-                    match command{
-                        Some(EgressPortCommand::IncFlows()) => {
-                            self.state.active_flows += 1;
-                            self.state.total_flows += 1;
-                        },
-                        Some(EgressPortCommand::DecFlows()) => {
-                            self.state.active_flows -= 1;
-                        },
-                        Some(EgressPortCommand::Stats(resp_tx)) => {
-                            println!("Port: {}, Total Flows: {}, Active Flows: {}, rx_bytes: {}, tx_bytes: {}, rx_packet: {}, tx_packets: {}, dropped packets: {}", self.port_name, self.state.total_flows, self.state.active_flows, self.state.rx_bytes, self.state.tx_bytes, self.state.rx_packets, self.state.tx_packets, self.state.dropped_packets);
-                            resp_tx.send(self.state.clone()).unwrap();
-                        },
-                        None => {}
-                    }
-                },
-                _ = self.data_rx.recv() => {
-                    if self.data_rx.len() == (self.buffer_size - 1) as usize{
-                        self.state.dropped_packets += 1;
-                    } else {
-                        self.state.rx_bytes += self.mtu as u64;
-                        self.state.rx_packets += 1;
-                    }
-                    async_timer::oneshot::Timer::new(tokio::time::Duration::from_nanos(time_per_packet_nanos as u64)).await;
-                } 
+            interval.tick().await;
+            if self.buffer.load(std::sync::atomic::Ordering::Relaxed) > 0{
+                self.buffer.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                self.rx_packets.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
     }
@@ -236,27 +220,46 @@ pub enum EgressPortCommand{
 
 #[derive(Clone)]
 pub struct EgressPortClient{
-    command_tx: tokio::sync::mpsc::Sender<EgressPortCommand>,
-    data_tx: tokio::sync::mpsc::Sender<()>,
+    port_name: String,
+    buffer: Arc<AtomicU64>,
+    rx_packets: Arc<AtomicU64>,
+    dropped_packets: Arc<AtomicU64>,
+    active_flows: Arc<AtomicU64>,
+    total_flows: Arc<AtomicU64>,
+    buffer_size: u32,
+    mtu: u16,
 }
 
 impl EgressPortClient{
     pub async fn inc_flows(&self){
-        self.command_tx.send(EgressPortCommand::IncFlows()).await.unwrap();
+        self.active_flows.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.total_flows.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     pub async fn dec_flows(&self){
-        self.command_tx.send(EgressPortCommand::DecFlows()).await.unwrap();
+        self.active_flows.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     }
     pub async fn stats(&self) -> anyhow::Result<PortState>{
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.command_tx.send(EgressPortCommand::Stats(tx)).await.unwrap();
-        match rx.await{
-            Ok(state) => return Ok(state),
-            Err(e) => return Err(e.into()),
+        let port_stats = PortState{
+            port_name: self.port_name.clone(),
+            total_flows: self.total_flows.load(std::sync::atomic::Ordering::Relaxed) as u32,
+            active_flows: self.active_flows.load(std::sync::atomic::Ordering::Relaxed) as u32,
+            rx_bytes: self.rx_packets.load(std::sync::atomic::Ordering::Relaxed) * self.mtu as u64,
+            tx_bytes: 0,
+            tx_packets: 0,
+            rx_packets: self.rx_packets.load(std::sync::atomic::Ordering::Relaxed),
+            dropped_packets: self.dropped_packets.load(std::sync::atomic::Ordering::Relaxed),
+        };
+        Ok(port_stats)
+    }
+    pub fn add_to_buffer(&self){
+        if self.buffer.load(std::sync::atomic::Ordering::Relaxed) == self.buffer_size as u64{
+            self.dropped_packets.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        } else {
+            self.buffer.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
     }
-    pub fn data_channel(&self) -> tokio::sync::mpsc::Sender<()>{
-        self.data_tx.clone()
+    pub fn buffer_size(&self) -> u64{
+        self.buffer.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -270,6 +273,7 @@ pub enum LoadBalancerMode{
 
 #[derive(Default, Clone, Debug)]
 pub struct PortState{
+    pub port_name: String,
     pub total_flows: u32,
     pub active_flows: u32,
     pub rx_bytes: u64,
@@ -277,4 +281,10 @@ pub struct PortState{
     pub rx_packets: u64,
     pub tx_packets: u64,
     pub dropped_packets: u64,
+}
+
+impl std::fmt::Display for PortState{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result{
+        write!(f, "Port: {}, Total Flows: {}, Active Flows: {}, rx_bytes: {}, tx_bytes: {}, rx_packet: {}, tx_packets: {}, dropped packets: {}", self.port_name, self.total_flows, self.active_flows, self.rx_bytes, self.tx_bytes, self.rx_packets, self.tx_packets, self.dropped_packets)
+    }
 }

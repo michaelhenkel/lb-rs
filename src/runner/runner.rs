@@ -32,6 +32,7 @@ impl Runner{
             let stats = egress_port.stats().await.unwrap();
             total_rx_bytes += stats.rx_bytes;
             total_rx_packets += stats.rx_packets;
+            println!("{}", stats);
         }
         let bytes_per_second = total_rx_bytes as f64 / elapsed;
         let bytes_per_second = byte_unit::Byte::from_f64_with_unit(bytes_per_second, byte_unit::Unit::B).unwrap().get_adjusted_unit(byte_unit::Unit::Gbit);

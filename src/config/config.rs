@@ -14,7 +14,7 @@ pub struct Args{
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Config{
     pub ingress_ports: Vec<InputPortConfig>,
-    pub buffer_size: u16,
+    pub buffer_size: u32,
     pub egress_ports: u16,
     pub speed: String,
     pub mode: LoadBalancerMode,
