@@ -1,11 +1,11 @@
 egress_ports: 4
-speed: 100Gbit
+speed: 200Gbit
 mtu: 4096
 buffer_size: 4096
 mode:
   #variant: StaticHash
   variant: Dfls
-  flowlet_size: 256
+  flowlet_size: 1024
 ingress_ports:
 - src_ip: 1.1.1.1
   flows:
@@ -15,10 +15,10 @@ ingress_ports:
 - src_ip: 1.1.1.1
   flows:
   - volume: 1GB
-    #destination: 1.1.1.30
-    #src_port: 100
-    destination: 1.1.1.40
-    src_port: 20011
+    destination: 1.1.1.30
+    src_port: 100
+    #destination: 1.1.1.40
+    #src_port: 20011
 - src_ip: 2.2.2.2
   flows:
   - volume: 1GB

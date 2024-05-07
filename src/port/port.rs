@@ -49,7 +49,7 @@ impl IngressPort{
         let time_per_packet = 1.0 / pps as f64;
         let time_per_packet_millis = time_per_packet * 1000.0;
         let time_per_packet_micros = time_per_packet_millis * 1000.0;
-        let time_per_packet_nanos = time_per_packet_micros * 1000.0;
+        let time_per_packet_nanos = (time_per_packet_micros * 1000.0)/100.0;
         while let Some(ingress_command) = self.command_rx.recv().await{
             match ingress_command{
                 IngressPortCommand::SendFlows(resp_tx) => {
@@ -95,7 +95,7 @@ impl IngressPort{
                                     }
                                     self.state.tx_packets += packets;
                                     self.state.tx_bytes += self.mtu as u64;
-                                    async_timer::oneshot::Timer::new(std::time::Duration::from_nanos(time_per_packet_nanos as u64)).await;
+                                    async_timer::oneshot::Timer::new(tokio::time::Duration::from_nanos(time_per_packet_nanos as u64)).await;
                                 }
                             },
                             LoadBalancerMode::StaticHash => {
@@ -107,7 +107,7 @@ impl IngressPort{
                                     }
                                     self.state.tx_packets += packets;
                                     self.state.tx_bytes += self.mtu as u64;
-                                    async_timer::oneshot::Timer::new(std::time::Duration::from_nanos(time_per_packet_nanos as u64)).await;
+                                    async_timer::oneshot::Timer::new(tokio::time::Duration::from_nanos(time_per_packet_nanos as u64)).await;
                                 }
                                 self.egress_ports[oif_idx].dec_flows().await;
                             },
@@ -194,7 +194,7 @@ impl EgressPort{
         let time_per_packet = 1.0 / pps as f64;
         let time_per_packet_millis = time_per_packet * 1000.0;
         let time_per_packet_micros = time_per_packet_millis * 1000.0;
-        let time_per_packet_nanos = time_per_packet_micros * 1000.0;
+        let time_per_packet_nanos = (time_per_packet_micros * 1000.0)/100.0;
         loop{
             tokio::select! {
                 command = self.command_rx.recv() => {
@@ -220,7 +220,7 @@ impl EgressPort{
                         self.state.rx_bytes += self.mtu as u64;
                         self.state.rx_packets += 1;
                     }
-                    async_timer::oneshot::Timer::new(std::time::Duration::from_nanos(time_per_packet_nanos as u64)).await;
+                    async_timer::oneshot::Timer::new(tokio::time::Duration::from_nanos(time_per_packet_nanos as u64)).await;
                 } 
             }
         }
