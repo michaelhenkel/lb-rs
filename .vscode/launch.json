@@ -1,0 +1,48 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'lb-rs'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=lb-rs",
+                    "--package=lb-rs"
+                ],
+                "filter": {
+                    "name": "lb-rs",
+                    "kind": "bin"
+                }
+            },
+            "args": [
+                "-c",
+                "config.yaml"
+            ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'lb-rs'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=lb-rs",
+                    "--package=lb-rs"
+                ],
+                "filter": {
+                    "name": "lb-rs",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}
